@@ -1,30 +1,13 @@
-from __future__ import with_statement
-from itertools import chain
 import datetime
 import sys
 import warnings
-import time
-import threading
 import time as mod_time
-from redis._compat import (b, basestring, bytes, imap, iteritems, iterkeys,
-                           itervalues, izip, long, nativestr, unicode,
-                           safe_unicode)
-from redis.connection import (ConnectionPool, UnixDomainSocketConnection,
-                              SSLConnection, Token)
-from redis.lock import Lock, LuaLock
-from redis.exceptions import (
-    ConnectionError,
-    DataError,
-    ExecAbortError,
-    NoScriptError,
-    PubSubError,
-    RedisError,
-    ResponseError,
-    TimeoutError,
-    WatchError,
-)
+from redis.connection import Connection, SSLConnection, Token
+from redis.exceptions import ConnectionError, DataError, RedisError, TimeoutError
+from ._compat import b, iteritems, iterkeys, itervalues, nativestr
 
-SYM_EMPTY = b('')
+
+SYM_EMPTY = ''
 
 
 def list_or_args(keys, args):
@@ -33,7 +16,7 @@ def list_or_args(keys, args):
         iter(keys)
         # a string or bytes instance can be iterated, but indicates
         # keys wasn't passed as a list
-        if isinstance(keys, (basestring, bytes)):
+        if isinstance(keys, (str, bytes)):
             keys = [keys]
     except TypeError:
         keys = [keys]
@@ -122,75 +105,16 @@ def parse_info(response):
     return info
 
 
-SENTINEL_STATE_TYPES = {
-    'can-failover-its-master': int,
-    'config-epoch': int,
-    'down-after-milliseconds': int,
-    'failover-timeout': int,
-    'info-refresh': int,
-    'last-hello-message': int,
-    'last-ok-ping-reply': int,
-    'last-ping-reply': int,
-    'last-ping-sent': int,
-    'master-link-down-time': int,
-    'master-port': int,
-    'num-other-sentinels': int,
-    'num-slaves': int,
-    'o-down-time': int,
-    'pending-commands': int,
-    'parallel-syncs': int,
-    'port': int,
-    'quorum': int,
-    'role-reported-time': int,
-    's-down-time': int,
-    'slave-priority': int,
-    'slave-repl-offset': int,
-    'voted-leader-epoch': int
-}
-
-
-def parse_sentinel_state(item):
-    result = pairs_to_dict_typed(item, SENTINEL_STATE_TYPES)
-    flags = set(result['flags'].split(','))
-    for name, flag in (('is_master', 'master'), ('is_slave', 'slave'),
-                       ('is_sdown', 's_down'), ('is_odown', 'o_down'),
-                       ('is_sentinel', 'sentinel'),
-                       ('is_disconnected', 'disconnected'),
-                       ('is_master_down', 'master_down')):
-        result[name] = flag in flags
-    return result
-
-
-def parse_sentinel_master(response):
-    return parse_sentinel_state(imap(nativestr, response))
-
-
-def parse_sentinel_masters(response):
-    result = {}
-    for item in response:
-        state = parse_sentinel_state(imap(nativestr, item))
-        result[state['name']] = state
-    return result
-
-
-def parse_sentinel_slaves_and_sentinels(response):
-    return [parse_sentinel_state(imap(nativestr, item)) for item in response]
-
-
-def parse_sentinel_get_master(response):
-    return response and (response[0], int(response[1])) or None
-
-
 def pairs_to_dict(response):
     "Create a dict given a list of key/value pairs"
     it = iter(response)
-    return dict(izip(it, it))
+    return dict(zip(it, it))
 
 
 def pairs_to_dict_typed(response, type_info):
     it = iter(response)
     result = {}
-    for key, value in izip(it, it):
+    for key, value in zip(it, it):
         if key in type_info:
             try:
                 value = type_info[key](value)
@@ -211,7 +135,7 @@ def zset_score_pairs(response, **options):
         return response
     score_cast_func = options.get('score_cast_func', float)
     it = iter(response)
-    return list(izip(it, imap(score_cast_func, it)))
+    return list(zip(it, map(score_cast_func, it)))
 
 
 def sort_return_tuples(response, **options):
@@ -222,7 +146,7 @@ def sort_return_tuples(response, **options):
     if not response or not options['groups']:
         return response
     n = options['groups']
-    return list(izip(*[response[i::n] for i in range(n)]))
+    return list(zip(*[response[i::n] for i in range(n)]))
 
 
 def int_or_none(response):
@@ -255,19 +179,19 @@ def parse_config_get(response, **options):
 
 def parse_scan(response, **options):
     cursor, r = response
-    return long(cursor), r
+    return int(cursor), r
 
 
 def parse_hscan(response, **options):
     cursor, r = response
-    return long(cursor), r and pairs_to_dict(r) or {}
+    return int(cursor), r and pairs_to_dict(r) or {}
 
 
 def parse_zscan(response, **options):
     score_cast_func = options.get('score_cast_func', float)
     cursor, r = response
     it = iter(r)
-    return long(cursor), list(izip(it, imap(score_cast_func, it)))
+    return int(cursor), list(zip(it, map(score_cast_func, it)))
 
 
 def parse_slowlog_get(response, **options):
@@ -303,7 +227,7 @@ def _parse_node_line(line):
 
 def parse_cluster_nodes(response, **options):
     raw_lines = response
-    if isinstance(response, basestring):
+    if isinstance(response, str):
         raw_lines = response.splitlines()
     return dict([_parse_node_line(line) for line in raw_lines])
 
@@ -335,7 +259,7 @@ class StrictRedis(object):
         string_keys_to_dict(
             # these return OK, or int if redis-server is >=1.3.4
             'LPUSH RPUSH',
-            lambda r: isinstance(r, long) and r or nativestr(r) == 'OK'
+            lambda r: isinstance(r, int) and r or nativestr(r) == 'OK'
         ),
         string_keys_to_dict('SORT', sort_return_tuples),
         string_keys_to_dict('ZSCORE ZINCRBY', float_or_none),
@@ -372,18 +296,10 @@ class StrictRedis(object):
             'PING': lambda r: nativestr(r) == 'PONG',
             'RANDOMKEY': lambda r: r and r or None,
             'SCAN': parse_scan,
-            'SCRIPT EXISTS': lambda r: list(imap(bool, r)),
+            'SCRIPT EXISTS': lambda r: list(map(bool, r)),
             'SCRIPT FLUSH': bool_ok,
             'SCRIPT KILL': bool_ok,
             'SCRIPT LOAD': nativestr,
-            'SENTINEL GET-MASTER-ADDR-BY-NAME': parse_sentinel_get_master,
-            'SENTINEL MASTER': parse_sentinel_master,
-            'SENTINEL MASTERS': parse_sentinel_masters,
-            'SENTINEL MONITOR': bool_ok,
-            'SENTINEL REMOVE': bool_ok,
-            'SENTINEL SENTINELS': parse_sentinel_slaves_and_sentinels,
-            'SENTINEL SET': bool_ok,
-            'SENTINEL SLAVES': parse_sentinel_slaves_and_sentinels,
             'SET': lambda r: r and nativestr(r) == 'OK',
             'SLOWLOG GET': parse_slowlog_get,
             'SLOWLOG LEN': int,
@@ -391,22 +307,6 @@ class StrictRedis(object):
             'SSCAN': parse_scan,
             'TIME': lambda x: (int(x[0]), int(x[1])),
             'ZSCAN': parse_zscan,
-            'CLUSTER ADDSLOTS': bool_ok,
-            'CLUSTER COUNT-FAILURE-REPORTS': lambda x: int(x),
-            'CLUSTER COUNTKEYSINSLOT': lambda x: int(x),
-            'CLUSTER DELSLOTS': bool_ok,
-            'CLUSTER FAILOVER': bool_ok,
-            'CLUSTER FORGET': bool_ok,
-            'CLUSTER INFO': parse_cluster_info,
-            'CLUSTER KEYSLOT': lambda x: int(x),
-            'CLUSTER MEET': bool_ok,
-            'CLUSTER NODES': parse_cluster_nodes,
-            'CLUSTER REPLICATE': bool_ok,
-            'CLUSTER RESET': bool_ok,
-            'CLUSTER SAVECONFIG': bool_ok,
-            'CLUSTER SET-CONFIG-EPOCH': bool_ok,
-            'CLUSTER SETSLOT': bool_ok,
-            'CLUSTER SLAVES': parse_cluster_nodes
         }
     )
 
@@ -433,21 +333,22 @@ class StrictRedis(object):
         passed along to the ConnectionPool class's initializer. In the case
         of conflicting arguments, querystring arguments always win.
         """
-        connection_pool = ConnectionPool.from_url(url, db=db, **kwargs)
-        return cls(connection_pool=connection_pool)
+        connection = Connection.from_url(url, db=db, **kwargs)
+        return cls(connection=connection)
 
     def __init__(self, host='localhost', port=6379,
                  db=0, password=None, socket_timeout=None,
                  socket_connect_timeout=None,
                  socket_keepalive=None, socket_keepalive_options=None,
-                 connection_pool=None, unix_socket_path=None,
+                 connection=None, unix_socket_path=None,
                  encoding='utf-8', encoding_errors='strict',
                  charset=None, errors=None,
                  decode_responses=False, retry_on_timeout=False,
                  ssl=False, ssl_keyfile=None, ssl_certfile=None,
                  ssl_cert_reqs=None, ssl_ca_certs=None,
                  max_connections=None):
-        if not connection_pool:
+
+        if not connection:
             if charset is not None:
                 warnings.warn(DeprecationWarning(
                     '"charset" is deprecated. Use "encoding" instead'))
@@ -465,139 +366,37 @@ class StrictRedis(object):
                 'encoding_errors': encoding_errors,
                 'decode_responses': decode_responses,
                 'retry_on_timeout': retry_on_timeout,
-                'max_connections': max_connections
             }
-            # based on input, setup appropriate connection args
-            if unix_socket_path is not None:
-                kwargs.update({
-                    'path': unix_socket_path,
-                    'connection_class': UnixDomainSocketConnection
-                })
-            else:
-                # TCP specific options
-                kwargs.update({
-                    'host': host,
-                    'port': port,
-                    'socket_connect_timeout': socket_connect_timeout,
-                    'socket_keepalive': socket_keepalive,
-                    'socket_keepalive_options': socket_keepalive_options,
-                })
+            # TCP specific options
+            kwargs.update({
+                'host': host,
+                'port': port,
+                'socket_connect_timeout': socket_connect_timeout,
+                'socket_keepalive': socket_keepalive,
+                'socket_keepalive_options': socket_keepalive_options,
+            })
 
-                if ssl:
-                    kwargs.update({
-                        'connection_class': SSLConnection,
-                        'ssl_keyfile': ssl_keyfile,
-                        'ssl_certfile': ssl_certfile,
-                        'ssl_cert_reqs': ssl_cert_reqs,
-                        'ssl_ca_certs': ssl_ca_certs,
-                    })
-            connection_pool = ConnectionPool(**kwargs)
-        self.connection_pool = connection_pool
+            if ssl:
+                kwargs.update({
+                    'connection_class': SSLConnection,
+                    'ssl_keyfile': ssl_keyfile,
+                    'ssl_certfile': ssl_certfile,
+                    'ssl_cert_reqs': ssl_cert_reqs,
+                    'ssl_ca_certs': ssl_ca_certs,
+                })
+            connection = Connection(**kwargs)
+
+        self.connection = connection
         self._use_lua_lock = None
 
         self.response_callbacks = self.__class__.RESPONSE_CALLBACKS.copy()
 
     def __repr__(self):
-        return "%s<%s>" % (type(self).__name__, repr(self.connection_pool))
+        return "%s<%s>" % (type(self).__name__, repr(self.connection))
 
     def set_response_callback(self, command, callback):
         "Set a custom Response Callback"
         self.response_callbacks[command] = callback
-
-    def pipeline(self, transaction=True, shard_hint=None):
-        """
-        Return a new pipeline object that can queue multiple commands for
-        later execution. ``transaction`` indicates whether all commands
-        should be executed atomically. Apart from making a group of operations
-        atomic, pipelines are useful for reducing the back-and-forth overhead
-        between the client and server.
-        """
-        return StrictPipeline(
-            self.connection_pool,
-            self.response_callbacks,
-            transaction,
-            shard_hint)
-
-    def transaction(self, func, *watches, **kwargs):
-        """
-        Convenience method for executing the callable `func` as a transaction
-        while watching all keys specified in `watches`. The 'func' callable
-        should expect a single argument which is a Pipeline object.
-        """
-        shard_hint = kwargs.pop('shard_hint', None)
-        value_from_callable = kwargs.pop('value_from_callable', False)
-        watch_delay = kwargs.pop('watch_delay', None)
-        with self.pipeline(True, shard_hint) as pipe:
-            while 1:
-                try:
-                    if watches:
-                        pipe.watch(*watches)
-                    func_value = func(pipe)
-                    exec_value = pipe.execute()
-                    return func_value if value_from_callable else exec_value
-                except WatchError:
-                    if watch_delay is not None and watch_delay > 0:
-                        time.sleep(watch_delay)
-                    continue
-
-    def lock(self, name, timeout=None, sleep=0.1, blocking_timeout=None,
-             lock_class=None, thread_local=True):
-        """
-        Return a new Lock object using key ``name`` that mimics
-        the behavior of threading.Lock.
-
-        If specified, ``timeout`` indicates a maximum life for the lock.
-        By default, it will remain locked until release() is called.
-
-        ``sleep`` indicates the amount of time to sleep per loop iteration
-        when the lock is in blocking mode and another client is currently
-        holding the lock.
-
-        ``blocking_timeout`` indicates the maximum amount of time in seconds to
-        spend trying to acquire the lock. A value of ``None`` indicates
-        continue trying forever. ``blocking_timeout`` can be specified as a
-        float or integer, both representing the number of seconds to wait.
-
-        ``lock_class`` forces the specified lock implementation.
-
-        ``thread_local`` indicates whether the lock token is placed in
-        thread-local storage. By default, the token is placed in thread local
-        storage so that a thread only sees its token, not a token set by
-        another thread. Consider the following timeline:
-
-            time: 0, thread-1 acquires `my-lock`, with a timeout of 5 seconds.
-                     thread-1 sets the token to "abc"
-            time: 1, thread-2 blocks trying to acquire `my-lock` using the
-                     Lock instance.
-            time: 5, thread-1 has not yet completed. redis expires the lock
-                     key.
-            time: 5, thread-2 acquired `my-lock` now that it's available.
-                     thread-2 sets the token to "xyz"
-            time: 6, thread-1 finishes its work and calls release(). if the
-                     token is *not* stored in thread local storage, then
-                     thread-1 would see the token value as "xyz" and would be
-                     able to successfully release the thread-2's lock.
-
-        In some use cases it's necessary to disable thread local storage. For
-        example, if you have code where one thread acquires a lock and passes
-        that lock instance to a worker thread to release later. If thread
-        local storage isn't disabled in this case, the worker thread won't see
-        the token set by the thread that acquired the lock. Our assumption
-        is that these cases aren't common and as such default to using
-        thread local storage.        """
-        if lock_class is None:
-            if self._use_lua_lock is None:
-                # the first time .lock() is called, determine if we can use
-                # Lua by attempting to register the necessary scripts
-                try:
-                    LuaLock.register_scripts(self)
-                    self._use_lua_lock = True
-                except ResponseError:
-                    self._use_lua_lock = False
-            lock_class = self._use_lua_lock and LuaLock or Lock
-        return lock_class(self, name, timeout=timeout, sleep=sleep,
-                          blocking_timeout=blocking_timeout,
-                          thread_local=thread_local)
 
     def pubsub(self, **kwargs):
         """
@@ -605,25 +404,21 @@ class StrictRedis(object):
         subscribe to channels and listen for messages that get published to
         them.
         """
-        return PubSub(self.connection_pool, **kwargs)
+        return PubSub(self.connection, **kwargs)
 
     # COMMAND EXECUTION AND PROTOCOL PARSING
     def execute_command(self, *args, **options):
-        "Execute a command and return a parsed response"
-        pool = self.connection_pool
+        """Execute a command and return a parsed response"""
         command_name = args[0]
-        connection = pool.get_connection(command_name, **options)
         try:
-            connection.send_command(*args)
-            return self.parse_response(connection, command_name, **options)
+            self.connection.send_command(*args)
+            return self.parse_response(self.connection, command_name, **options)
         except (ConnectionError, TimeoutError) as e:
-            connection.disconnect()
-            if not connection.retry_on_timeout and isinstance(e, TimeoutError):
+            self.connection.disconnect()
+            if not self.connection.retry_on_timeout and isinstance(e, TimeoutError):
                 raise
-            connection.send_command(*args)
-            return self.parse_response(connection, command_name, **options)
-        finally:
-            pool.release(connection)
+            self.connection.send_command(*args)
+            return self.parse_response(self.connection, command_name, **options)
 
     def parse_response(self, connection, command_name, **options):
         "Parses a response from the Redis server"
@@ -732,44 +527,6 @@ class StrictRedis(object):
         blocking until the save is complete
         """
         return self.execute_command('SAVE')
-
-    def sentinel(self, *args):
-        "Redis Sentinel's SENTINEL command."
-        warnings.warn(
-            DeprecationWarning('Use the individual sentinel_* methods'))
-
-    def sentinel_get_master_addr_by_name(self, service_name):
-        "Returns a (host, port) pair for the given ``service_name``"
-        return self.execute_command('SENTINEL GET-MASTER-ADDR-BY-NAME',
-                                    service_name)
-
-    def sentinel_master(self, service_name):
-        "Returns a dictionary containing the specified masters state."
-        return self.execute_command('SENTINEL MASTER', service_name)
-
-    def sentinel_masters(self):
-        "Returns a list of dictionaries containing each master's state."
-        return self.execute_command('SENTINEL MASTERS')
-
-    def sentinel_monitor(self, name, ip, port, quorum):
-        "Add a new master to Sentinel to be monitored"
-        return self.execute_command('SENTINEL MONITOR', name, ip, port, quorum)
-
-    def sentinel_remove(self, name):
-        "Remove a master from Sentinel's monitoring"
-        return self.execute_command('SENTINEL REMOVE', name)
-
-    def sentinel_sentinels(self, service_name):
-        "Returns a list of sentinels for ``service_name``"
-        return self.execute_command('SENTINEL SENTINELS', service_name)
-
-    def sentinel_set(self, name, option, value):
-        "Set Sentinel monitoring parameters for a given master"
-        return self.execute_command('SENTINEL SET', name, option, value)
-
-    def sentinel_slaves(self, service_name):
-        "Returns a list of slaves for ``service_name``"
-        return self.execute_command('SENTINEL SLAVES', service_name)
 
     def shutdown(self):
         "Shutdown the server"
@@ -1200,7 +957,7 @@ class StrictRedis(object):
         """
         if timeout is None:
             timeout = 0
-        if isinstance(keys, basestring):
+        if isinstance(keys, str):
             keys = [keys]
         else:
             keys = list(keys)
@@ -1220,7 +977,7 @@ class StrictRedis(object):
         """
         if timeout is None:
             timeout = 0
-        if isinstance(keys, basestring):
+        if isinstance(keys, str):
             keys = [keys]
         else:
             keys = list(keys)
@@ -1373,7 +1130,7 @@ class StrictRedis(object):
             # Otherwise assume it's an interable and we want to get multiple
             # values. We can't just iterate blindly because strings are
             # iterable.
-            if isinstance(get, basestring):
+            if isinstance(get, str):
                 pieces.append(Token('GET'))
                 pieces.append(get)
             else:
@@ -1389,7 +1146,7 @@ class StrictRedis(object):
             pieces.append(store)
 
         if groups:
-            if not get or isinstance(get, basestring) or len(get) < 2:
+            if not get or isinstance(get, str) or len(get) < 2:
                 raise DataError('when using "groups" the "get" argument '
                                 'must be specified and contain at least '
                                 'two keys')
@@ -1991,35 +1748,6 @@ class StrictRedis(object):
         """
         return self.execute_command('EVALSHA', sha, numkeys, *keys_and_args)
 
-    def script_exists(self, *args):
-        """
-        Check if a script exists in the script cache by specifying the SHAs of
-        each script as ``args``. Returns a list of boolean values indicating if
-        if each already script exists in the cache.
-        """
-        return self.execute_command('SCRIPT EXISTS', *args)
-
-    def script_flush(self):
-        "Flush all scripts from the script cache"
-        return self.execute_command('SCRIPT FLUSH')
-
-    def script_kill(self):
-        "Kill the currently executing Lua script"
-        return self.execute_command('SCRIPT KILL')
-
-    def script_load(self, script):
-        "Load a Lua ``script`` into the script cache. Returns the SHA."
-        return self.execute_command('SCRIPT LOAD', script)
-
-    def register_script(self, script):
-        """
-        Register a Lua ``script`` specifying the ``keys`` it will touch.
-        Returns a Script object that is callable and hides the complexity of
-        deal with scripts, keys, and shas. This is the preferred way to work
-        with Lua scripts.
-        """
-        return Script(self, script)
-
 
 class Redis(StrictRedis):
     """
@@ -2036,20 +1764,6 @@ class Redis(StrictRedis):
             'PTTL': lambda r: r >= 0 and r or None,
         }
     )
-
-    def pipeline(self, transaction=True, shard_hint=None):
-        """
-        Return a new pipeline object that can queue multiple commands for
-        later execution. ``transaction`` indicates whether all commands
-        should be executed atomically. Apart from making a group of operations
-        atomic, pipelines are useful for reducing the back-and-forth overhead
-        between the client and server.
-        """
-        return Pipeline(
-            self.connection_pool,
-            self.response_callbacks,
-            transaction,
-            shard_hint)
 
     def setex(self, name, value, time):
         """
@@ -2116,21 +1830,18 @@ class PubSub(object):
     PUBLISH_MESSAGE_TYPES = ('message', 'pmessage')
     UNSUBSCRIBE_MESSAGE_TYPES = ('unsubscribe', 'punsubscribe')
 
-    def __init__(self, connection_pool, shard_hint=None,
+    def __init__(self, connection, shard_hint=None,
                  ignore_subscribe_messages=False):
-        self.connection_pool = connection_pool
+        self.connection = connection
         self.shard_hint = shard_hint
         self.ignore_subscribe_messages = ignore_subscribe_messages
         self.connection = None
         # we need to know the encoding options for this connection in order
         # to lookup channel and pattern names for callback handlers.
-        conn = connection_pool.get_connection('pubsub', shard_hint)
-        try:
-            self.encoding = conn.encoding
-            self.encoding_errors = conn.encoding_errors
-            self.decode_responses = conn.decode_responses
-        finally:
-            connection_pool.release(conn)
+        conn = connection.get_connection('pubsub', shard_hint)
+        self.encoding = conn.encoding
+        self.encoding_errors = conn.encoding_errors
+        self.decode_responses = conn.decode_responses
         self.reset()
 
     def __del__(self):
@@ -2146,7 +1857,6 @@ class PubSub(object):
         if self.connection:
             self.connection.disconnect()
             self.connection.clear_connect_callbacks()
-            self.connection_pool.release(self.connection)
             self.connection = None
         self.channels = {}
         self.patterns = {}
@@ -2181,7 +1891,7 @@ class PubSub(object):
         """
         if self.decode_responses and isinstance(value, bytes):
             value = value.decode(self.encoding, self.encoding_errors)
-        elif not self.decode_responses and isinstance(value, unicode):
+        elif not self.decode_responses and isinstance(value, str):
             value = value.encode(self.encoding, self.encoding_errors)
         return value
 
@@ -2241,7 +1951,7 @@ class PubSub(object):
         if args:
             args = list_or_args(args[0], args[1:])
         new_patterns = {}
-        new_patterns.update(dict.fromkeys(imap(self.encode, args)))
+        new_patterns.update(dict.fromkeys(map(self.encode, args)))
         for pattern, handler in iteritems(kwargs):
             new_patterns[self.encode(pattern)] = handler
         ret_val = self.execute_command('PSUBSCRIBE', *iterkeys(new_patterns))
@@ -2271,7 +1981,7 @@ class PubSub(object):
         if args:
             args = list_or_args(args[0], args[1:])
         new_channels = {}
-        new_channels.update(dict.fromkeys(imap(self.encode, args)))
+        new_channels.update(dict.fromkeys(map(self.encode, args)))
         for channel, handler in iteritems(kwargs):
             new_channels[self.encode(channel)] = handler
         ret_val = self.execute_command('SUBSCRIBE', *iterkeys(new_channels))
@@ -2361,387 +2071,3 @@ class PubSub(object):
                 return None
 
         return message
-
-    def run_in_thread(self, sleep_time=0):
-        for channel, handler in iteritems(self.channels):
-            if handler is None:
-                raise PubSubError("Channel: '%s' has no handler registered")
-        for pattern, handler in iteritems(self.patterns):
-            if handler is None:
-                raise PubSubError("Pattern: '%s' has no handler registered")
-
-        thread = PubSubWorkerThread(self, sleep_time)
-        thread.start()
-        return thread
-
-
-class PubSubWorkerThread(threading.Thread):
-    def __init__(self, pubsub, sleep_time):
-        super(PubSubWorkerThread, self).__init__()
-        self.pubsub = pubsub
-        self.sleep_time = sleep_time
-        self._running = False
-
-    def run(self):
-        if self._running:
-            return
-        self._running = True
-        pubsub = self.pubsub
-        sleep_time = self.sleep_time
-        while pubsub.subscribed:
-            pubsub.get_message(ignore_subscribe_messages=True,
-                               timeout=sleep_time)
-        pubsub.close()
-        self._running = False
-
-    def stop(self):
-        # stopping simply unsubscribes from all channels and patterns.
-        # the unsubscribe responses that are generated will short circuit
-        # the loop in run(), calling pubsub.close() to clean up the connection
-        self.pubsub.unsubscribe()
-        self.pubsub.punsubscribe()
-
-
-class BasePipeline(object):
-    """
-    Pipelines provide a way to transmit multiple commands to the Redis server
-    in one transmission.  This is convenient for batch processing, such as
-    saving all the values in a list to Redis.
-
-    All commands executed within a pipeline are wrapped with MULTI and EXEC
-    calls. This guarantees all commands executed in the pipeline will be
-    executed atomically.
-
-    Any command raising an exception does *not* halt the execution of
-    subsequent commands in the pipeline. Instead, the exception is caught
-    and its instance is placed into the response list returned by execute().
-    Code iterating over the response list should be able to deal with an
-    instance of an exception as a potential value. In general, these will be
-    ResponseError exceptions, such as those raised when issuing a command
-    on a key of a different datatype.
-    """
-
-    UNWATCH_COMMANDS = set(('DISCARD', 'EXEC', 'UNWATCH'))
-
-    def __init__(self, connection_pool, response_callbacks, transaction,
-                 shard_hint):
-        self.connection_pool = connection_pool
-        self.connection = None
-        self.response_callbacks = response_callbacks
-        self.transaction = transaction
-        self.shard_hint = shard_hint
-
-        self.watching = False
-        self.reset()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.reset()
-
-    def __del__(self):
-        try:
-            self.reset()
-        except Exception:
-            pass
-
-    def __len__(self):
-        return len(self.command_stack)
-
-    def reset(self):
-        self.command_stack = []
-        self.scripts = set()
-        # make sure to reset the connection state in the event that we were
-        # watching something
-        if self.watching and self.connection:
-            try:
-                # call this manually since our unwatch or
-                # immediate_execute_command methods can call reset()
-                self.connection.send_command('UNWATCH')
-                self.connection.read_response()
-            except ConnectionError:
-                # disconnect will also remove any previous WATCHes
-                self.connection.disconnect()
-        # clean up the other instance attributes
-        self.watching = False
-        self.explicit_transaction = False
-        # we can safely return the connection to the pool here since we're
-        # sure we're no longer WATCHing anything
-        if self.connection:
-            self.connection_pool.release(self.connection)
-            self.connection = None
-
-    def multi(self):
-        """
-        Start a transactional block of the pipeline after WATCH commands
-        are issued. End the transactional block with `execute`.
-        """
-        if self.explicit_transaction:
-            raise RedisError('Cannot issue nested calls to MULTI')
-        if self.command_stack:
-            raise RedisError('Commands without an initial WATCH have already '
-                             'been issued')
-        self.explicit_transaction = True
-
-    def execute_command(self, *args, **kwargs):
-        if (self.watching or args[0] == 'WATCH') and \
-                not self.explicit_transaction:
-            return self.immediate_execute_command(*args, **kwargs)
-        return self.pipeline_execute_command(*args, **kwargs)
-
-    def immediate_execute_command(self, *args, **options):
-        """
-        Execute a command immediately, but don't auto-retry on a
-        ConnectionError if we're already WATCHing a variable. Used when
-        issuing WATCH or subsequent commands retrieving their values but before
-        MULTI is called.
-        """
-        command_name = args[0]
-        conn = self.connection
-        # if this is the first call, we need a connection
-        if not conn:
-            conn = self.connection_pool.get_connection(command_name,
-                                                       self.shard_hint)
-            self.connection = conn
-        try:
-            conn.send_command(*args)
-            return self.parse_response(conn, command_name, **options)
-        except (ConnectionError, TimeoutError) as e:
-            conn.disconnect()
-            if not conn.retry_on_timeout and isinstance(e, TimeoutError):
-                raise
-            # if we're not already watching, we can safely retry the command
-            try:
-                if not self.watching:
-                    conn.send_command(*args)
-                    return self.parse_response(conn, command_name, **options)
-            except ConnectionError:
-                # the retry failed so cleanup.
-                conn.disconnect()
-                self.reset()
-                raise
-
-    def pipeline_execute_command(self, *args, **options):
-        """
-        Stage a command to be executed when execute() is next called
-
-        Returns the current Pipeline object back so commands can be
-        chained together, such as:
-
-        pipe = pipe.set('foo', 'bar').incr('baz').decr('bang')
-
-        At some other point, you can then run: pipe.execute(),
-        which will execute all commands queued in the pipe.
-        """
-        self.command_stack.append((args, options))
-        return self
-
-    def _execute_transaction(self, connection, commands, raise_on_error):
-        cmds = chain([(('MULTI', ), {})], commands, [(('EXEC', ), {})])
-        all_cmds = connection.pack_commands([args for args, _ in cmds])
-        connection.send_packed_command(all_cmds)
-        errors = []
-
-        # parse off the response for MULTI
-        # NOTE: we need to handle ResponseErrors here and continue
-        # so that we read all the additional command messages from
-        # the socket
-        try:
-            self.parse_response(connection, '_')
-        except ResponseError:
-            errors.append((0, sys.exc_info()[1]))
-
-        # and all the other commands
-        for i, command in enumerate(commands):
-            try:
-                self.parse_response(connection, '_')
-            except ResponseError:
-                ex = sys.exc_info()[1]
-                self.annotate_exception(ex, i + 1, command[0])
-                errors.append((i, ex))
-
-        # parse the EXEC.
-        try:
-            response = self.parse_response(connection, '_')
-        except ExecAbortError:
-            if self.explicit_transaction:
-                self.immediate_execute_command('DISCARD')
-            if errors:
-                raise errors[0][1]
-            raise sys.exc_info()[1]
-
-        if response is None:
-            raise WatchError("Watched variable changed.")
-
-        # put any parse errors into the response
-        for i, e in errors:
-            response.insert(i, e)
-
-        if len(response) != len(commands):
-            self.connection.disconnect()
-            raise ResponseError("Wrong number of response items from "
-                                "pipeline execution")
-
-        # find any errors in the response and raise if necessary
-        if raise_on_error:
-            self.raise_first_error(commands, response)
-
-        # We have to run response callbacks manually
-        data = []
-        for r, cmd in izip(response, commands):
-            if not isinstance(r, Exception):
-                args, options = cmd
-                command_name = args[0]
-                if command_name in self.response_callbacks:
-                    r = self.response_callbacks[command_name](r, **options)
-            data.append(r)
-        return data
-
-    def _execute_pipeline(self, connection, commands, raise_on_error):
-        # build up all commands into a single request to increase network perf
-        all_cmds = connection.pack_commands([args for args, _ in commands])
-        connection.send_packed_command(all_cmds)
-
-        response = []
-        for args, options in commands:
-            try:
-                response.append(
-                    self.parse_response(connection, args[0], **options))
-            except ResponseError:
-                response.append(sys.exc_info()[1])
-
-        if raise_on_error:
-            self.raise_first_error(commands, response)
-        return response
-
-    def raise_first_error(self, commands, response):
-        for i, r in enumerate(response):
-            if isinstance(r, ResponseError):
-                self.annotate_exception(r, i + 1, commands[i][0])
-                raise r
-
-    def annotate_exception(self, exception, number, command):
-        cmd = safe_unicode(' ').join(imap(safe_unicode, command))
-        msg = unicode('Command # %d (%s) of pipeline caused error: %s') % (
-            number, cmd, safe_unicode(exception.args[0]))
-        exception.args = (msg,) + exception.args[1:]
-
-    def parse_response(self, connection, command_name, **options):
-        result = StrictRedis.parse_response(
-            self, connection, command_name, **options)
-        if command_name in self.UNWATCH_COMMANDS:
-            self.watching = False
-        elif command_name == 'WATCH':
-            self.watching = True
-        return result
-
-    def load_scripts(self):
-        # make sure all scripts that are about to be run on this pipeline exist
-        scripts = list(self.scripts)
-        immediate = self.immediate_execute_command
-        shas = [s.sha for s in scripts]
-        # we can't use the normal script_* methods because they would just
-        # get buffered in the pipeline.
-        exists = immediate('SCRIPT', 'EXISTS', *shas, **{'parse': 'EXISTS'})
-        if not all(exists):
-            for s, exist in izip(scripts, exists):
-                if not exist:
-                    s.sha = immediate('SCRIPT', 'LOAD', s.script,
-                                      **{'parse': 'LOAD'})
-
-    def execute(self, raise_on_error=True):
-        "Execute all the commands in the current pipeline"
-        stack = self.command_stack
-        if not stack:
-            return []
-        if self.scripts:
-            self.load_scripts()
-        if self.transaction or self.explicit_transaction:
-            execute = self._execute_transaction
-        else:
-            execute = self._execute_pipeline
-
-        conn = self.connection
-        if not conn:
-            conn = self.connection_pool.get_connection('MULTI',
-                                                       self.shard_hint)
-            # assign to self.connection so reset() releases the connection
-            # back to the pool after we're done
-            self.connection = conn
-
-        try:
-            return execute(conn, stack, raise_on_error)
-        except (ConnectionError, TimeoutError) as e:
-            conn.disconnect()
-            if not conn.retry_on_timeout and isinstance(e, TimeoutError):
-                raise
-            # if we were watching a variable, the watch is no longer valid
-            # since this connection has died. raise a WatchError, which
-            # indicates the user should retry his transaction. If this is more
-            # than a temporary failure, the WATCH that the user next issues
-            # will fail, propegating the real ConnectionError
-            if self.watching:
-                raise WatchError("A ConnectionError occured on while watching "
-                                 "one or more keys")
-            # otherwise, it's safe to retry since the transaction isn't
-            # predicated on any state
-            return execute(conn, stack, raise_on_error)
-        finally:
-            self.reset()
-
-    def watch(self, *names):
-        "Watches the values at keys ``names``"
-        if self.explicit_transaction:
-            raise RedisError('Cannot issue a WATCH after a MULTI')
-        return self.execute_command('WATCH', *names)
-
-    def unwatch(self):
-        "Unwatches all previously specified keys"
-        return self.watching and self.execute_command('UNWATCH') or True
-
-    def script_load_for_pipeline(self, script):
-        "Make sure scripts are loaded prior to pipeline execution"
-        # we need the sha now so that Script.__call__ can use it to run
-        # evalsha.
-        if not script.sha:
-            script.sha = self.immediate_execute_command('SCRIPT', 'LOAD',
-                                                        script.script,
-                                                        **{'parse': 'LOAD'})
-        self.scripts.add(script)
-
-
-class StrictPipeline(BasePipeline, StrictRedis):
-    "Pipeline for the StrictRedis class"
-    pass
-
-
-class Pipeline(BasePipeline, Redis):
-    "Pipeline for the Redis class"
-    pass
-
-
-class Script(object):
-    "An executable Lua script object returned by ``register_script``"
-
-    def __init__(self, registered_client, script):
-        self.registered_client = registered_client
-        self.script = script
-        self.sha = ''
-
-    def __call__(self, keys=[], args=[], client=None):
-        "Execute the script, passing any required ``args``"
-        if client is None:
-            client = self.registered_client
-        args = tuple(keys) + tuple(args)
-        # make sure the Redis server knows about the script
-        if isinstance(client, BasePipeline):
-            # make sure this script is good to go on pipeline
-            client.script_load_for_pipeline(self)
-        try:
-            return client.evalsha(self.sha, len(keys), *args)
-        except NoScriptError:
-            # Maybe the client is pointed to a differnet server than the client
-            # that created this instance?
-            self.sha = client.script_load(self.script)
-            return client.evalsha(self.sha, len(keys), *args)
